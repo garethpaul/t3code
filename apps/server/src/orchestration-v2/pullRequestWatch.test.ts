@@ -81,6 +81,37 @@ const remark = (
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
 describe("evaluatePullRequestWatch", () => {
+  it.each(["workflow-contracts", "JS/TS: mcp-server"])(
+    "wakes when ci-gate fails after the already-reported %s failure",
+    (name) => {
+      const failed = check(name, "failure");
+      const pending = { ...check("ci-gate", "pending"), required: true };
+      const first = evaluatePullRequestWatch(
+        watch(),
+        detail({ checks: [failed, pending] }),
+        noRemarks,
+      );
+      assert.deepEqual(first.changes, [{ kind: "checks-failed", failed: [failed] }]);
+      const unchanged = evaluatePullRequestWatch(
+        first.next,
+        detail({ checks: [failed, pending] }),
+        noRemarks,
+      );
+      assert.deepEqual(unchanged.changes, []);
+      const gate = { ...pending, status: "failure" as const };
+      const final = evaluatePullRequestWatch(
+        unchanged.next,
+        detail({ checks: [failed, gate] }),
+        noRemarks,
+      );
+      assert.deepEqual(final.changes, [{ kind: "checks-failed", failed: [gate] }]);
+      assert.deepEqual(
+        evaluatePullRequestWatch(final.next, detail({ checks: [failed, gate] }), noRemarks).changes,
+        [],
+      );
+    },
+  );
+
   it("waits for workflow approval once, through reads that miss it, until the run finishes", () => {
     const bot = check("bot", "success");
     const approval = { ...check("CI", "action-required"), url: run(1) };

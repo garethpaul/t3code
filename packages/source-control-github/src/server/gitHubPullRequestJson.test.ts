@@ -16,6 +16,7 @@ import {
   toLabelCandidates,
   toPullRequestActivityPage,
   toPullRequestCore,
+  pullRequestChecksFromContexts,
   toPullRequestFilesViewedPage,
   toPullRequestRows,
   toReviewerCandidates,
@@ -432,6 +433,42 @@ describe("pull request detail decoding", () => {
     rollup: ReadonlyArray<Record<string, unknown>>,
     pullRequest?: Record<string, unknown>,
   ) => expectSuccess(decodePullRequestCoreJson(coreJson(rollup, pullRequest)));
+
+  it("keeps required contexts pending before their jobs exist", () => {
+    const detail = detailOf([], {
+      baseRef: {
+        compare: null,
+        branchProtectionRule: { requiredStatusCheckContexts: ["ci-gate", "ci-gate"] },
+      },
+    });
+    expect(detail.checks).toEqual([
+      {
+        name: "ci-gate",
+        status: "pending",
+        description: "Waiting for this required check to report.",
+        url: null,
+        required: true,
+      },
+    ]);
+    expect(detail.checksState).toBe("pending");
+    expect(pullRequestChecksFromContexts([], detail.requiredCheckContexts).checks).toEqual(
+      detail.checks,
+    );
+
+    const baseRef = {
+      compare: null,
+      branchProtectionRule: { requiredStatusCheckContexts: ["ci-gate"] },
+    };
+    const passed = check({ name: "ci-gate", conclusion: "SUCCESS", isRequired: true });
+    expect(detailOf([passed], { baseRef }).checks).toEqual([
+      { name: "ci-gate", status: "success", description: null, url: null, required: true },
+    ]);
+    const wrongApp = detailOf([{ ...passed, isRequired: false }], { baseRef });
+    expect(wrongApp.checks.some((check) => check.required && check.status === "pending")).toBe(
+      true,
+    );
+    expect(wrongApp.checksState).toBe("pending");
+  });
 
   it.each([
     [{}, true],

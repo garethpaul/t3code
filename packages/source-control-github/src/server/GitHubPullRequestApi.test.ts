@@ -3415,6 +3415,58 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect.each(["protection", "reviewer-first", "protection-first", "together"])(
+    "keeps PR details readable after a protection refusal (%s)",
+    (order) =>
+      Effect.gen(function* () {
+        const protection = {
+          ...refusedReviewer,
+          path: ["repository", "pullRequest", "baseRef", "branchProtectionRule"],
+        };
+        const refusals =
+          order === "protection"
+            ? [[protection]]
+            : order === "reviewer-first"
+              ? [[refusedReviewer], [protection]]
+              : order === "protection-first"
+                ? [[protection], [refusedReviewer]]
+                : [[protection, refusedReviewer], [refusedReviewer]];
+        for (const errors of refusals) {
+          mockedExecute.mockReturnValueOnce(
+            Effect.succeed(output(encodeJson({ ...coreResponse(), errors }))),
+          );
+        }
+        mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson(coreResponse()))));
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const read = cli.getPullRequestDetail({
+          ...pullRequestInput,
+          repository: `acme/protection-${order}`,
+        });
+        const detail = yield* read;
+        expect(detail.headSha).toBe("abc123");
+        const variables = variablesOf("query PullRequestCore");
+        expect(variables.map((v) => v["protection"])).toEqual(
+          order === "protection"
+            ? [true, false]
+            : order === "reviewer-first"
+              ? [true, true, false]
+              : [true, false, false],
+        );
+        expect(variables.map((v) => v["requestedReviewers"])).toEqual(
+          order === "protection"
+            ? [100, 100]
+            : order === "reviewer-first"
+              ? [100, 0, 0]
+              : [100, 100, 0],
+        );
+        expect(variables.every((v) => v["required"] === true)).toBe(true);
+        expect(mockedExecute).toHaveBeenCalledTimes(refusals.length + 1);
+        mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson(coreResponse()))));
+        yield* read;
+        expect(variablesOf("query PullRequestCore").at(-1)).toMatchObject({ protection: true });
+      }),
+  );
+
   // regression: #19564 only a refused reviewer path is retried; other failures surface as-is
   it.effect.each([
     {
@@ -3579,6 +3631,10 @@ layer("GitHubPullRequestApi.layer", (it) => {
             output(
               encodeJson(
                 coreResponse({
+                  baseRef: {
+                    compare: null,
+                    branchProtectionRule: { requiredStatusCheckContexts: ["ci-gate"] },
+                  },
                   commits: {
                     nodes: [
                       {
@@ -3616,10 +3672,18 @@ layer("GitHubPullRequestApi.layer", (it) => {
           expect(variablesOf("PullRequestCore").map((v) => v["requestedReviewers"])).toEqual([
             100, 0,
           ]);
-        expect(detail.checks.map((check) => check.name).sort()).toEqual(["first", "last"]);
+        expect(detail.checks.map((check) => check.name).sort()).toEqual([
+          "ci-gate",
+          "first",
+          "last",
+        ]);
+        expect(detail.checks.find((check) => check.name === "ci-gate")).toMatchObject({
+          status: "pending",
+          required: true,
+        });
         expect(detail.checksState).toBe("failing");
         expect(detail.checksTruncated).toBe(false);
-        expect(variablesOf("CheckContexts")).toEqual([
+        expect(variablesOf("query PullRequestCheckContexts")).toEqual([
           expect.objectContaining({ number: 7, after: "c1" }),
         ]);
         expect(mockedExecute).toHaveBeenCalledTimes(refused ? 3 : 2);

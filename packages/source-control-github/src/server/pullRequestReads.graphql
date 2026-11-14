@@ -58,6 +58,7 @@ query PullRequestCore(
   $number: Int!
   $headRef: String!
   $required: Boolean!
+  $protection: Boolean!
   $requestedReviewers: Int!
 ) {
   repository(owner: $owner, name: $name) {
@@ -115,6 +116,9 @@ query PullRequestCore(
       viewerDidAuthor
       viewerCanUpdateBranch
       baseRef {
+        branchProtectionRule @include(if: $protection) {
+          requiredStatusCheckContexts
+        }
         compare(headRef: $headRef) {
           behindBy
         }
