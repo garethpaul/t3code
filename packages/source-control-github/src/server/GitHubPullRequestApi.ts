@@ -320,22 +320,40 @@ const isGraphQlClientError = (error: unknown): error is GraphQLClientError.Graph
 
 const { isNotFoundOnly } = GitHubGraphQlClient;
 
+const isRequestedReviewerPath = (path: ReadonlyArray<unknown> | null | undefined) =>
+  path?.length === 6 &&
+  path[0] === "repository" &&
+  path[1] === "pullRequest" &&
+  path[2] === "reviewRequests" &&
+  path[3] === "nodes" &&
+  typeof path[4] === "number" &&
+  Number.isInteger(path[4]) &&
+  path[4] >= 0 &&
+  path[5] === "requestedReviewer";
+
+const isBranchProtectionPath = (path: ReadonlyArray<unknown> | null | undefined) =>
+  path?.length === 4 &&
+  path[0] === "repository" &&
+  path[1] === "pullRequest" &&
+  path[2] === "baseRef" &&
+  path[3] === "branchProtectionRule";
+
 const isRefusedRequestedReviewersOnly = (error: unknown): boolean =>
   isGraphQlClientError(error) &&
   error.reason._tag === "ResponseError" &&
   error.reason.status === 200 &&
   error.reason.errors.every(
+    ({ path, type }) => type === "FORBIDDEN" && isRequestedReviewerPath(path),
+  );
+
+const isRefusedBranchProtectionOnly = (error: unknown): boolean =>
+  isGraphQlClientError(error) &&
+  error.reason._tag === "ResponseError" &&
+  error.reason.status === 200 &&
+  error.reason.errors.some(({ path }) => isBranchProtectionPath(path)) &&
+  error.reason.errors.every(
     ({ path, type }) =>
-      type === "FORBIDDEN" &&
-      path?.length === 6 &&
-      path[0] === "repository" &&
-      path[1] === "pullRequest" &&
-      path[2] === "reviewRequests" &&
-      path[3] === "nodes" &&
-      typeof path[4] === "number" &&
-      Number.isInteger(path[4]) &&
-      path[4] >= 0 &&
-      path[5] === "requestedReviewer",
+      type === "FORBIDDEN" && (isBranchProtectionPath(path) || isRequestedReviewerPath(path)),
   );
 
 /** A large pull request can produce a multi-megabyte patch; past this it is truncated. */
@@ -1451,19 +1469,33 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const getPullRequestDetail: GitHubPullRequestApi["Service"]["getPullRequestDetail"] = (input) => {
+  const getPullRequestDetail: GitHubPullRequestApi["Service"]["getPullRequestDetail"] = Effect.fn(
+    "GitHubPullRequestApi.getPullRequestDetail",
+  )(function* (input) {
     const { owner, name } = parseRepositorySelector(input.repository);
     const operation = "getPullRequestDetail";
-    const read = (requestedReviewers: number) =>
+    let protection = asksRequired(input.host);
+    const query = (requestedReviewers: number) =>
       client.PullRequestCore({
         owner,
         name,
         number: input.number,
         headRef: `refs/pull/${input.number}/head`,
         required: asksRequired(input.host),
+        protection,
         requestedReviewers,
       });
-    return SourceControlRateLimit.Interactive.pipe(
+    const read = (requestedReviewers: number) =>
+      query(requestedReviewers).pipe(
+        Effect.catchIf(
+          (error) => protection && isRefusedBranchProtectionOnly(error),
+          () => {
+            protection = false;
+            return query(requestedReviewers);
+          },
+        ),
+      );
+    return yield* SourceControlRateLimit.Interactive.pipe(
       Effect.flatMap((allowReserve) =>
         readRequestedReviewers(input, 100, read).pipe(
           graphql({ ...input, operation, allowReserve }),
@@ -1479,7 +1511,7 @@ export const make = Effect.gen(function* () {
                   ).pipe(
                     Effect.map((all) => ({
                       ...core,
-                      ...pullRequestChecksFromContexts(all.contexts),
+                      ...pullRequestChecksFromContexts(all.contexts, core.requiredCheckContexts),
                       checksTruncated: all.truncated,
                     })),
                   ),
@@ -1489,7 +1521,7 @@ export const make = Effect.gen(function* () {
         ),
       ),
     );
-  };
+  });
 
   const workflowApprovalLimit = 1_000;
   const workflowApprovalReadError = (cwd: string, cause: unknown) =>

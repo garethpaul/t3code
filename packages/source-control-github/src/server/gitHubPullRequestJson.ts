@@ -1028,6 +1028,7 @@ export interface GitHubPullRequestCore extends GitHubPullRequestDetail {
   readonly viewerAccess: GitHubViewerAccess & GitHubRepositoryAccess;
   readonly comparison: GitHubBaseComparison | null;
   readonly checksTruncated: boolean;
+  readonly requiredCheckContexts?: ReadonlyArray<string>;
 }
 
 type CoreRequestedReviewer = NonNullable<
@@ -1041,7 +1042,11 @@ export function toPullRequestCore(result: PullRequestCore.Result): GitHubPullReq
   const pr = repository?.pullRequest;
   if (repository == null || pr == null) return null;
   const contexts = nodesOf(pr.commits)[0]?.commit.statusCheckRollup?.contexts;
+  const requiredCheckContexts = (
+    pr.baseRef?.branchProtectionRule?.requiredStatusCheckContexts ?? []
+  ).filter((name): name is string => name !== null);
   return {
+    requiredCheckContexts,
     reviewRequestTeams: nodesOf(pr.reviewRequests).flatMap(
       ({ requestedReviewer }) => toRequestedTeam(requestedReviewer) ?? [],
     ),
@@ -1068,6 +1073,7 @@ export function toPullRequestCore(result: PullRequestCore.Result): GitHubPullReq
       labels: nodesOf(pr.labels),
       statusCheckRollup: toCheckContexts(nodesOf(contexts)),
     }),
+    ...pullRequestChecksFromContexts(toCheckContexts(nodesOf(contexts)), requiredCheckContexts),
     headRepositoryNameWithOwner: trimmed(pr.headRepository?.nameWithOwner),
     maintainerCanModify: pr.maintainerCanModify,
     canEditMaintainerEdits:
@@ -1219,11 +1225,28 @@ export function toPullRequestCheckContextsPage(result: PullRequestCheckContexts.
   };
 }
 
-export function pullRequestChecksFromContexts(contexts: ReadonlyArray<GitHubCheckContext>): {
+export function pullRequestChecksFromContexts(
+  contexts: ReadonlyArray<GitHubCheckContext>,
+  requiredCheckContexts: ReadonlyArray<string> = [],
+): {
   readonly checks: ReadonlyArray<PullRequestCheck>;
   readonly checksState: PullRequestChecksState | null;
 } {
-  return { checks: toChecks(contexts), checksState: rollupChecksState(contexts) };
+  const reported = new Set(
+    contexts
+      .filter((check) => check.isRequired === true)
+      .map((check) => check.name ?? check.context),
+  );
+  const missing = [...new Set(requiredCheckContexts)]
+    .filter((name) => !reported.has(name))
+    .map((name) => ({
+      name,
+      status: "PENDING",
+      isRequired: true,
+      description: "Waiting for this required check to report.",
+    }));
+  const complete = [...contexts, ...missing];
+  return { checks: toChecks(complete), checksState: rollupChecksState(complete) };
 }
 
 export interface GitHubReviewThreadComments {
